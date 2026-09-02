@@ -5035,14 +5035,21 @@ async function _fbInit() {
     if (cfgSnap.exists) {
       Object.assign(state, cfgSnap.data());
       // Merge asesores: local gana sobre Firestore para asesores existentes
-      // (preserva cambios de credenciales que aún no llegaron a Firestore)
+      // Merge asesores: Firebase manda en campos organizacionales (supervisor, tipo, programa).
+      // Solo se preservan del local los campos de credenciales (password, email) que pueden
+      // no haber llegado aún a Firestore si el debounce fue interrumpido.
       if (_localAsesores.length > 0) {
         if (state.asesores && state.asesores.length > 0) {
-          state.asesores = state.asesores.map(a =>
-            (a && a.nombre && _localAsesoresByNombre[a.nombre])
-              ? Object.assign({}, a, _localAsesoresByNombre[a.nombre])
-              : a
-          );
+          state.asesores = state.asesores.map(a => {
+            if (!a || !a.nombre) return a;
+            const loc = _localAsesoresByNombre[a.nombre];
+            if (!loc) return a;
+            // Solo los campos de credencial vienen del local; supervisor/tipo/programa los manda Firebase
+            const credFields = {};
+            if (loc.password) credFields.password = loc.password;
+            if (loc.email)    credFields.email    = loc.email;
+            return Object.assign({}, a, credFields);
+          });
           // Asesores que están en local pero no llegaron a Firestore aún (nuevo asesor sin sync)
           const _fbNombres = new Set(state.asesores.map(a => a && a.nombre));
           _localAsesores.filter(a => a && a.nombre && !_fbNombres.has(a.nombre))
