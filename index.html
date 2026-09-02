@@ -3188,13 +3188,20 @@ body.modo-coordinador #gestion-datos-panel { display: none !important; }
           </button>
           <input type="file" id="email-import-file" accept=".xlsx,.xls,.csv" style="display:none"
             onchange="importarEmailsExcel(this)">
-          <!-- Botón carga masiva de asesores con supervisor -->
+          <!-- Botones asignación supervisor -->
+          <button onclick="descargarAsignacionActual()"
+            style="display:flex;align-items:center;gap:6px;padding:8px 16px;
+                   background:rgba(201,165,69,0.10);color:var(--accent);border:1px solid rgba(201,165,69,0.40);
+                   border-radius:var(--radius-sm);font:700 12px 'Montserrat',sans-serif;cursor:pointer"
+            title="Descarga Excel con todos los asesores y su supervisor actual para editar y re-subir">
+            ⬇ Exportar asignación actual (.xlsx)
+          </button>
           <button onclick="document.getElementById('sup-import-file').click()"
             style="display:flex;align-items:center;gap:6px;padding:8px 16px;
                    background:rgba(201,165,69,0.10);color:var(--accent);border:1px solid rgba(201,165,69,0.40);
                    border-radius:var(--radius-sm);font:700 12px 'Montserrat',sans-serif;cursor:pointer"
-            title="Excel con columnas ASESOR y SUPERVISOR para asignar supervisores en bloque">
-            👥 Cargar asesores / supervisores (.xlsx)
+            title="Sube el Excel editado con columnas ASESOR y SUPERVISOR para actualizar asignaciones en bloque">
+            ⬆ Cargar asignación (.xlsx / .csv)
           </button>
           <input type="file" id="sup-import-file" accept=".xlsx,.xls,.csv" style="display:none"
             onchange="importarAsesoresSupervisoresExcel(this)">
@@ -11165,6 +11172,42 @@ function descargarPlantillaCambioSup() {
   ws['!cols'] = [{wch:40},{wch:40}];
   XLSX.utils.book_append_sheet(wb, ws, 'Cambio Supervisor');
   XLSX.writeFile(wb, 'plantilla_cambio_supervisor.xlsx');
+}
+
+// Descarga el Excel con la asignación actual (supervisor por asesor) para editar y re-subir
+function descargarAsignacionActual() {
+  if (typeof XLSX === 'undefined') { alert('Librería no disponible. Recarga la página.'); return; }
+  const norm = s => String(s || '').trim();
+  // Ordenar por supervisor y luego por asesor
+  const filas = [...(state.asesores || [])]
+    .filter(a => a && a.nombre)
+    .sort((a, b) => {
+      const cmp = norm(a.supervisor).localeCompare(norm(b.supervisor), 'es');
+      return cmp !== 0 ? cmp : norm(a.nombre).localeCompare(norm(b.nombre), 'es');
+    })
+    .map(a => [norm(a.nombre), norm(a.supervisor), norm(a.tipo || ''), norm(a.programa || '')]);
+
+  if (!filas.length) { alert('No hay asesores registrados.'); return; }
+
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet([
+    ['ASESOR', 'SUPERVISOR', 'TIPO', 'PROGRAMA'],
+    ...filas
+  ]);
+  ws['!cols'] = [{wch:40},{wch:36},{wch:12},{wch:16}];
+  XLSX.utils.book_append_sheet(wb, ws, 'Asignación');
+
+  // Segunda pestaña con los supervisores válidos del sistema
+  const listaSups = (state.supervisores || []).filter(Boolean).sort((a,b) => a.localeCompare(b,'es'));
+  const wsSup = XLSX.utils.aoa_to_sheet([
+    ['Supervisores registrados en el sistema'],
+    ...listaSups.map(s => [s])
+  ]);
+  wsSup['!cols'] = [{wch:40}];
+  XLSX.utils.book_append_sheet(wb, wsSup, 'Supervisores');
+
+  const fecha = new Date().toISOString().slice(0,10);
+  XLSX.writeFile(wb, `asignacion_supervisores_${fecha}.xlsx`);
 }
 
 function handleDropCambioSup(e) {
