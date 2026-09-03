@@ -4974,6 +4974,8 @@ async function _fbSaveEval(ev, intentos) {
   intentos = intentos || 0;
   try {
     await window._fbDb.collection('evaluaciones').doc(String(ev.id)).set(ev);
+    // Escribir recibo liviano en colección separada como respaldo adicional
+    _fbSavePendiente(ev).catch(() => {});
     return true;
   } catch(e) {
     console.warn('Error guardando evaluación en Firestore (intento ' + (intentos+1) + '):', e);
@@ -4983,6 +4985,71 @@ async function _fbSaveEval(ev, intentos) {
     }
     return false;
   }
+}
+
+// Escribe un recibo liviano (sin preguntas ni selecciones) en la colección `pendientes`.
+// Es una vía de respaldo independiente de evaluaciones/ y de config/main (sin límite de 1MB).
+async function _fbSavePendiente(ev) {
+  if (!window._fbDb) return;
+  const recibo = {
+    id: ev.id, asesor: ev.asesor, supervisor: ev.supervisor,
+    mes: ev.mes, anio: ev.anio, modalidad: ev.modalidad || 'mensual',
+    pts: ev.pct, pct: ev.pct, pass: (ev.pct >= (ev.modalidad === 'asesor-nuevo' ? 60 : 95)),
+    correctas: ev.correctas, total: ev.total, nota: ev.nota || null,
+    actividad: ev.actividad, fechaRegistro: ev.fechaRegistro,
+    registradoPor: 'asesor'
+  };
+  try {
+    await window._fbDb.collection('pendientes').doc(String(ev.id)).set(recibo);
+  } catch(e) {
+    console.warn('Error escribiendo pendientes:', e);
+  }
+}
+
+// Verifica en el servidor (no en caché) que la evaluación llegó; actualiza el banner del resultado.
+async function _verificarConfirmacion(evalId, bannerId) {
+  const banner = document.getElementById(bannerId || 'result-sync-banner');
+  if (!banner || !window._fbDb) return;
+  const MAX = 24; // hasta ~2 minutos (24 × 5s)
+  for (let i = 0; i < MAX; i++) {
+    await new Promise(r => setTimeout(r, i === 0 ? 2000 : 5000));
+    if (!document.getElementById('asesor-result-section') ||
+        !document.getElementById('asesor-result-section').classList.contains('show')) return;
+    try {
+      const snap = await window._fbDb.collection('evaluaciones').doc(String(evalId)).get({ source: 'server' });
+      if (snap.exists) {
+        banner.innerHTML = `
+          <span style="font-size:22px">✓</span>
+          <div style="text-align:left">
+            <div style="font-weight:700;color:var(--pass);font-size:13px">Evaluación confirmada en el servidor</div>
+            <div style="font-size:12px;color:var(--text3);margin-top:2px">Tu resultado ya está disponible en los reportes de tu formadora.</div>
+          </div>`;
+        banner.style.background    = 'rgba(78,138,114,0.08)';
+        banner.style.borderColor   = 'rgba(78,138,114,0.30)';
+        return;
+      }
+    } catch(e) { /* offline — seguir intentando */ }
+    const seg = (i + 1) * 5;
+    const aviso = seg >= 30
+      ? '<br><span style="font-size:11px;color:var(--fail)">⚠ Mantén esta página abierta con internet. No la cierres hasta ver la confirmación.</span>'
+      : '';
+    banner.innerHTML = `
+      <span style="font-size:20px">⏳</span>
+      <div style="text-align:left">
+        <div style="font-weight:600;color:var(--accent);font-size:13px">Sincronizando con el servidor… (${seg}s)</div>
+        <div style="font-size:12px;color:var(--text3);margin-top:2px">Tu resultado está guardado en este dispositivo.${aviso}</div>
+      </div>`;
+    banner.style.background  = 'rgba(201,165,69,0.07)';
+    banner.style.borderColor = 'rgba(201,165,69,0.28)';
+  }
+  banner.innerHTML = `
+    <span style="font-size:22px">⚠</span>
+    <div style="text-align:left">
+      <div style="font-weight:700;color:var(--fail);font-size:13px">No se pudo confirmar el guardado</div>
+      <div style="font-size:12px;color:var(--text3);margin-top:2px">Muestra esta pantalla a tu formadora para que registre tu resultado manualmente.</div>
+    </div>`;
+  banner.style.background  = 'rgba(184,80,80,0.07)';
+  banner.style.borderColor = 'rgba(184,80,80,0.28)';
 }
 
 // Elimina una evaluación de Firestore
@@ -5158,6 +5225,31 @@ async function _fbInit() {
           _backupFaltantes.forEach(ev => _fbSaveEval(ev));
         }
       }
+      // Recuperar desde colección `pendientes` — recibos livianos escritos por _fbSaveEval
+      // como respaldo independiente de config/main. Útil si evalBackup no llegó a Firestore.
+      try {
+        const _pendSnap = await window._fbDb.collection('pendientes').get();
+        if (!_pendSnap.empty) {
+          const _collIds3 = new Set(state.evaluaciones.map(e => String(e.id)));
+          const _pendFaltantes = _pendSnap.docs.map(d => d.data())
+            .filter(e => e.id && !_collIds3.has(String(e.id)) && !_MESES_EXCLUIR.includes(e.mes));
+          if (_pendFaltantes.length) {
+            // El recibo solo tiene metadata (sin respuestas detalladas) — añadir al estado
+            // para que aparezca en los reportes mientras se busca la versión completa.
+            state.evaluaciones = [...state.evaluaciones, ..._pendFaltantes];
+            // Intentar recuperar también la versión completa y re-escribirla a evaluaciones/
+            _pendFaltantes.forEach(ev => _fbSaveEval(ev));
+            console.info('Recuperadas ' + _pendFaltantes.length + ' evaluaciones desde pendientes/');
+          }
+          // Limpiar pendientes que ya están confirmadas en evaluaciones/
+          const _collIds4 = new Set(state.evaluaciones.map(e => String(e.id)));
+          _pendSnap.docs.forEach(d => {
+            if (_collIds4.has(String(d.data().id))) {
+              d.ref.delete().catch(() => {});
+            }
+          });
+        }
+      } catch(e) { console.warn('No se pudo leer pendientes/:', e); }
     } else if (state.evaluaciones && state.evaluaciones.length > 0) {
       const evs = state.evaluaciones.filter(ev => !_MESES_EXCLUIR.includes(ev.mes));
       state.evaluaciones = evs;
@@ -16445,11 +16537,21 @@ async function enviarEvaluacionAsesor() {
     }
   }
 
-  // Sync confirmation banner
+  // Sync confirmation banner — empieza en estado "sincronizando" y se actualiza con la verificación real
   const syncBanner = document.getElementById('result-sync-banner');
   if (syncBanner) {
+    syncBanner.innerHTML = `
+      <span style="font-size:20px">⏳</span>
+      <div style="text-align:left">
+        <div style="font-weight:600;color:var(--accent);font-size:13px">Sincronizando con el servidor…</div>
+        <div style="font-size:12px;color:var(--text3);margin-top:2px">Tu resultado está guardado en este dispositivo. Verificando conexión…</div>
+      </div>`;
+    syncBanner.style.background  = 'rgba(201,165,69,0.07)';
+    syncBanner.style.borderColor = 'rgba(201,165,69,0.28)';
     syncBanner.style.display = 'flex';
-    setTimeout(() => syncBanner.style.opacity = '1', 50);
+    setTimeout(() => { syncBanner.style.opacity = '1'; }, 50);
+    // Verificar confirmación real en segundo plano
+    _verificarConfirmacion(evObj.id, 'result-sync-banner');
   }
 
   // Gemini retroalimentación (solo si hay API Key configurada)
